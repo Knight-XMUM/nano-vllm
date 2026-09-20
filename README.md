@@ -1,3 +1,59 @@
+> **Research fork** of [GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm)
+> (pinned at `bb823b3`, MIT © Xingkai Yu — original README kept intact below).
+> This fork is the engine layer of **KVOS**: a controlled measurement platform for
+> KV-cache eviction policies under agent-style long-session workloads.
+
+# KVOS research fork
+
+**Question under study:** which signal — recency, frequency, or topology (prefix-tree
+blast radius) — should dominate KV-block eviction at which cache/working-set ratio (c/N)?
+Hypotheses (H1–H9), the trace schema, the metric chain, and three kill criteria are
+**pre-registered** before any policy benchmark runs.
+
+**Status (2026-09-20):** engine verified and version-pinned; K0 platform code in progress.
+The code is currently identical to upstream `bb823b3`.
+
+## Verified evidence (measured, not claimed)
+
+| Check | Setup | Result |
+|---|---|---|
+| Correctness vs vLLM | Qwen2.5-0.5B-Instruct `7ae55760`, `enforce_eager`, batch=1 | token-for-token identical to vLLM 0.11.0 (`18553c5`) |
+| Decode throughput | single request, RTX PRO 6000 96GB, eager | ~105 tok/s (vLLM ~131, HF transformers ~45) |
+| Baseline gap | — | ~80% of vLLM; the remaining ~25% is the optimization budget |
+
+Recorded as experiment E-001 (2026-09-16). Raw numbers; warmup runs discarded.
+
+## Roadmap (K0–K4)
+
+- **K0** — dual-plane allocator (live plane pinned / context plane evictable), four policy
+  hooks (`on_allocate` / `on_access` / `on_evict` / `on_commit`), deterministic trace
+  replayer, logprob-parity gate (≤1e-4)
+- **K1** — six-arm eviction grid over c/N: A hash-block LRU · B radix-tree LRU ·
+  C +frequency · D +blast-radius fanout · E Belady oracle bound · F one-line heuristic.
+  Metric chain: refault distance → recomputed tokens → PCIe bytes → P99 TTFT/TBT
+- **K2** — COW fork for branched generation + HBM→host lookahead offload
+- **K3** — block-size / fragmentation study, migration cost model, MoE expert paging repro
+- **K4** — tech memo + minimal upstream PR (pluggable evictor interface)
+
+## Reproduce the baseline
+
+```bash
+pip install -e .        # needs torch 2.8.0+cu128, transformers 5.10.4, flash-attn
+huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct --local-dir ~/huggingface/Qwen2.5-0.5B
+# then point `path` in bench.py at your model dir; enforce_eager=True for a fair A/B
+python bench.py
+```
+
+Correctness gate: greedy-decode identical prompts through HF transformers and vLLM;
+the first 128 generated tokens must match before any performance number is reported.
+
+*The pre-registration protocol and lab notebook (Chinese) live in a companion workspace
+and will be published with the K4 technical memo.*
+
+---
+
+# Original upstream README
+
 <p align="center">
 <img width="300" src="assets/logo.png">
 </p>
