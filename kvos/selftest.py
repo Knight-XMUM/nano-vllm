@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 
@@ -297,6 +298,56 @@ def main():
     none = adapters.check_reproduction(ev2, None)
     check("G8 K0-4 复核机：对/错/空三种结局正确",
           good["ok"] and not bad["ok"] and not none["ok"])
+
+    # G8b 三源真实字段样本（2026-09-24 已核实的 schema）
+    with tempfile.TemporaryDirectory() as d:
+        # mooncake：JSONL {timestamp,input_length,output_length,hash_ids}
+        p = os.path.join(d, "mooncake.jsonl")
+        with open(p, "w") as f:
+            f.write(json.dumps({"timestamp": 0, "input_length": 6758,
+                                "output_length": 500, "hash_ids": [0, 1, 2]}) + "\n")
+            f.write(json.dumps({"timestamp": 1, "input_length": 7322,
+                                "output_length": 490, "hash_ids": [0, 3, 4]}) + "\n")
+        ev_m, _ = adapters.get("mooncake").parse_file(p)
+        check("G8b mooncake：hash_ids→前缀 + native 标记",
+              len(ev_m) == 2 and ev_m[0].prefix_block_hashes == ["0", "1", "2"]
+              and ev_m[0].hash_provenance == "native")
+
+        # weka：单 JSON 文档 {id, block_size, requests:[{t,in,out,hash_ids}]}
+        p = os.path.join(d, "trace_0001.json")
+        with open(p, "w") as f:
+            json.dump({"id": "trace_0001", "block_size": 64, "hash_id_scope": "local",
+                       "requests": [{"t": 0.0, "type": "n", "in": 71175, "out": 169,
+                                     "hash_ids": [1, 2, 3]},
+                                    {"t": 1.5, "type": "n", "in": 100, "out": 50,
+                                     "hash_ids": [1, 2, 9]}]}, f)
+        ev_w, st_w = adapters.get("weka").parse_file(p)
+        check("G8b weka：文件=会话 + local id 加文件前缀",
+              len(ev_w) == 2 and ev_w[1].prefix_block_hashes[0] == "trace_0001#1"
+              and ev_w[1].parent_request_id == "trace_0001_r0")
+
+        # cachewise：JSON 数组，llm_call/tool_call 混合，位置派生块
+        pdir = os.path.join(d, "project_001", "session_0001")
+        os.makedirs(pdir)
+        p = os.path.join(pdir, "events.json")
+        with open(p, "w") as f:
+            json.dump([
+                {"event_type": "llm_call", "timestamp": "2020-07-07T17:18:54+00:00",
+                 "session_id": "session_0001", "request_id": "req_00001",
+                 "input_tokens": 40, "output_tokens": 10,
+                 "cache_creation_input_tokens": 36312, "cache_read_input_tokens": 32,
+                 "has_tool_use": True, "num_tools_called": 1},
+                {"event_type": "tool_call", "tool_name": "Grep"},
+                {"event_type": "llm_call", "timestamp": "2020-07-07T17:19:00+00:00",
+                 "session_id": "session_0001", "request_id": "req_00002",
+                 "input_tokens": 80, "output_tokens": 20,
+                 "cache_creation_input_tokens": 100, "cache_read_input_tokens": 60},
+            ], f)
+        ev_c, _ = adapters.get("cachewise").parse_file(p)
+        check("G8b cachewise：只收 llm_call + 项目共享前缀派生",
+              len(ev_c) == 2
+              and ev_c[0].prefix_block_hashes[0].startswith("project_001:sys:")
+              and ev_c[0].hash_provenance == "derived")
 
     # G9 网格 + 冻结 + 判定器
     from kvos import grid
