@@ -16,8 +16,155 @@ from __future__ import annotations
 import os
 import tempfile
 
-from kvos import analysis, arms, synth, trace as tr
+from collections import deque
+
+from kvos import adapters, analysis, arms, synth, trace as tr
 from kvos.replayer import Replayer
+
+
+# ---------- FakeBM：逐行复刻上游 block_manager.py 语义（G7 用） ----------
+
+class _FakeBlock:
+    def __init__(self, block_id):
+        self.block_id = block_id
+        self.ref_count = 0
+        self.hash = -1
+        self.token_ids = []
+
+    def update(self, h, token_ids):
+        self.hash = h
+        self.token_ids = token_ids
+
+    def reset(self):
+        self.ref_count = 1
+        self.hash = -1
+        self.token_ids = []
+
+
+class _FakeSeq:
+    def __init__(self, seq_id, token_ids, block_size):
+        self.seq_id = seq_id
+        self.token_ids = list(token_ids)
+        self.block_size = block_size
+        self.block_table = []
+        self.num_cached_tokens = 0
+        self.num_scheduled_tokens = 0
+
+    @property
+    def num_blocks(self):
+        return (len(self.token_ids) + self.block_size - 1) // self.block_size
+
+    def block(self, i):
+        return self.token_ids[i * self.block_size:(i + 1) * self.block_size]
+
+
+class FakeBM:
+    """上游 BlockManager 的逐行复刻（哈希换成确定性字符串，不依赖 xxhash）。"""
+
+    def __init__(self, num_blocks, block_size):
+        self.block_size = block_size
+        self.blocks = [_FakeBlock(i) for i in range(num_blocks)]
+        self.hash_to_block_id = {}
+        self.free_block_ids = deque(range(num_blocks))
+        self.used_block_ids = set()
+
+    @classmethod
+    def compute_hash(cls, token_ids, prefix=-1):
+        return "%s|%s" % (prefix, ",".join(map(str, token_ids)))
+
+    def _allocate_block(self):
+        block_id = self.free_block_ids.popleft()
+        block = self.blocks[block_id]
+        assert block.ref_count == 0
+        if block.hash != -1 and self.hash_to_block_id.get(block.hash) == block_id:
+            del self.hash_to_block_id[block.hash]
+        block.reset()
+        self.used_block_ids.add(block_id)
+        return block_id
+
+    def _deallocate_block(self, block_id):
+        assert self.blocks[block_id].ref_count == 0
+        self.used_block_ids.remove(block_id)
+        self.free_block_ids.append(block_id)
+
+    def can_allocate(self, seq):
+        h = -1
+        num_cached = 0
+        num_new = seq.num_blocks
+        for i in range(seq.num_blocks - 1):
+            token_ids = seq.block(i)
+            h = self.compute_hash(token_ids, h)
+            bid = self.hash_to_block_id.get(h, -1)
+            if bid == -1 or self.blocks[bid].token_ids != token_ids:
+                break
+            num_cached += 1
+            if bid in self.used_block_ids:
+                num_new -= 1
+        if len(self.free_block_ids) < num_new:
+            return -1
+        return num_cached
+
+    def allocate(self, seq, num_cached):
+        assert not seq.block_table
+        h = -1
+        for i in range(num_cached):
+            h = self.compute_hash(seq.block(i), h)
+            bid = self.hash_to_block_id[h]
+            blk = self.blocks[bid]
+            if bid in self.used_block_ids:
+                blk.ref_count += 1
+            else:
+                blk.ref_count = 1
+                self.free_block_ids.remove(bid)
+                self.used_block_ids.add(bid)
+            seq.block_table.append(bid)
+        for _ in range(num_cached, seq.num_blocks):
+            seq.block_table.append(self._allocate_block())
+        seq.num_cached_tokens = num_cached * self.block_size
+
+    def deallocate(self, seq):
+        for bid in reversed(seq.block_table):
+            blk = self.blocks[bid]
+            blk.ref_count -= 1
+            if blk.ref_count == 0:
+                self._deallocate_block(bid)
+        seq.num_cached_tokens = 0
+        seq.block_table.clear()
+
+    def hash_blocks(self, seq):
+        start = seq.num_cached_tokens // self.block_size
+        end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
+        if start == end:
+            return
+        h = self.blocks[seq.block_table[start - 1]].hash if start > 0 else -1
+        for i in range(start, end):
+            blk = self.blocks[seq.block_table[i]]
+            h = self.compute_hash(seq.block(i), h)
+            blk.update(h, seq.block(i))
+            self.hash_to_block_id[h] = blk.block_id
+
+
+class _TrackPolicy(arms.HashLRU):
+    """记账版 A 臂：数四个钩子各被调了几次，记每次驱逐的候选集。"""
+    name = "T"
+
+    def __init__(self):
+        self.calls = {"alloc": 0, "access": 0, "evict": 0, "commit": 0}
+        self.evict_cands = []
+
+    def on_allocate(self, blk, tick, was_evicted):
+        self.calls["alloc"] += 1
+
+    def on_access(self, blk, tick):
+        self.calls["access"] += 1
+
+    def on_commit(self, blk, tick):
+        self.calls["commit"] += 1
+
+    def on_evict(self, candidates, tick):
+        self.calls["evict"] += 1
+        self.evict_cands.append([b.hash for b in candidates])
+        return min(candidates, key=lambda b: b.last_access).hash
 
 
 def _oracle_maps(events):
@@ -93,6 +240,80 @@ def main():
     rep_b, _ = run_arm("B", events, capacity)
     final_obs = {h: len(s) for h, s in rep_b.table._fanout_seen.items()}
     check("G6 oracle fanout == 在线计数终值", fan == final_obs)
+
+    # G7 引擎侧双平面（FakeBM 上验 K0-1 语义）
+    from kvos.engine_plane import DualPlaneAllocator
+
+    bs = 4
+    bm = FakeBM(num_blocks=6, block_size=bs)
+    pol = _TrackPolicy()
+    DualPlaneAllocator(bm, pol)
+
+    sa = _FakeSeq("A", list(range(12)), bs)          # A：3 块
+    na = bm.can_allocate(sa)
+    bm.allocate(sa, na)
+    sa.num_scheduled_tokens = len(sa.token_ids) - sa.num_cached_tokens
+    bm.hash_blocks(sa)
+    bm.deallocate(sa)                                # A 死 → 3 块应进 context 不进 free
+    alloc = pol.table._a                             # context_ids 挂在 allocator 侧
+    check("G7 deallocate → context=3, free=3（不是 6）",
+          len(alloc.context_ids) == 3 and len(bm.free_block_ids) == 3,
+          "context=%d free=%d" % (len(alloc.context_ids), len(bm.free_block_ids)))
+    check("G7 on_commit 被调 3 次", pol.calls["commit"] == 3)
+    check("G7 on_allocate 被调 3 次", pol.calls["alloc"] == 3)
+
+    sb = _FakeSeq("B", list(range(8)) + [20, 21, 22, 23], bs)  # 共享 A 头两块
+    nb = bm.can_allocate(sb)
+    check("G7 context 命中算 cached（上游只算 used）", nb == 2, "num_cached=%d" % nb)
+    bm.allocate(sb, nb)
+    sb.num_scheduled_tokens = len(sb.token_ids) - sb.num_cached_tokens
+    bm.hash_blocks(sb)
+    check("G7 复活触发 on_access×2", pol.calls["access"] == 2)
+    check("G7 B 的新块触发 on_allocate", pol.calls["alloc"] == 4)
+
+    # B 还活着（live），C 来抢：free=2 + context=1，C 要 3 块 → 必然驱逐
+    sc = _FakeSeq("C", [99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 89, 88], bs)
+    nc = bm.can_allocate(sc)
+    b_live = set(sb.block_table)
+    bm.allocate(sc, nc)
+    check("G7 free 见底触发驱逐且只动 context（B 的活块没挨刀）",
+          pol.calls["evict"] >= 1
+          and all(b in bm.used_block_ids for b in b_live))
+    evicted_hash = alloc.evict_tick.keys()
+    check("G7 牺牲者不是 B 的块",
+          not any(bm.blocks[b].hash in evicted_hash for b in b_live))
+
+    # G8 adapter 框架 + K0-4 复核机
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "canon.jsonl")
+        tr.dump_events(events, p)
+        ev2, st2 = adapters.get("canonical").parse_file(p)
+    rep = adapters.stats_report(ev2)
+    check("G8 canonical 直通 + 统计报告",
+          rep["n_requests"] == len(events) and rep["n_sessions"] == 12,
+          "sessions=%d blocks=%d" % (rep["n_sessions"], rep["n_distinct_blocks"]))
+    good = adapters.check_reproduction(ev2, {"n_sessions": 12, "n_requests": len(events)})
+    bad = adapters.check_reproduction(ev2, {"n_sessions": 9999})
+    none = adapters.check_reproduction(ev2, None)
+    check("G8 K0-4 复核机：对/错/空三种结局正确",
+          good["ok"] and not bad["ok"] and not none["ok"])
+
+    # G9 网格 + 冻结 + 判定器
+    from kvos import grid
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "t.jsonl")
+        tr.dump_events(events, p)
+        rec = grid.freeze_knee(p)
+        rows = grid.run_grid(events, [80, 220], ["A", "E", "F"])
+    check("G9 freeze 落盘含曲线与判定",
+          "curve" in rec and "r_star" in rec and len(rows) == 6)
+    check("G9 verdict 三态正确",
+          grid.verdict(0.05, 0.04, 0.06) == "beat"
+          and grid.verdict(0.05, -0.10, 0.20) == "indistinguishable"
+          and grid.verdict(-0.05, -0.06, -0.04) == "lose")
+    cb = analysis.class_breakdown(events, rep_b.log)
+    check("G9 H4 四象限分解产出", isinstance(cb, dict) and len(cb) > 0,
+          "quadrants=%d" % len(cb))
 
     print("\nselftest %s" % ("ALL PASS" if ok else "HAS FAILURES"))
     return 0 if ok else 1

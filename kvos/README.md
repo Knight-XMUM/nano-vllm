@@ -28,9 +28,12 @@ synth.py    →   trace.py      →   planes.py      ←    hooks.py      ←   
 | `hooks.py` | 策略接口：on_allocate / on_access / on_evict / on_commit | PROTOCOL §8 |
 | `arms/` | 八臂一臂一文件（A~H），看哪个臂就读哪个文件 | PROTOCOL §8 v1.2 |
 | `replayer.py` | 回放循环：同一份 trace 原样喂给每个策略 | §4.4 / K0-2 |
-| `analysis.py` | S(W) 曲线、Kneedle 拐点、bootstrap CI、删失统计 | §5–§6 |
+| `analysis.py` | S(W) 曲线、Kneedle、bootstrap CI、删失统计、H4 四象限 | §5–§6 / H4 |
 | `synth.py` | 五维合成 trace 生成器（只用于诊断，不做结论） | §4.3 |
-| `selftest.py` | 六条门禁：确定性/不变量/饱和探针/八臂/分析链/schema | K0-1、K0-2 精神 |
+| `engine_plane.py` | **引擎侧双平面**：猴子补丁包装 BlockManager，free-list→policy 辖区 | K0-1 正身 |
+| `adapters/` | 真 trace → canonical 的适配层 + K0-4 复核机 | K0-2 / K0-4 |
+| `grid.py` | K1 装备：臂×容量网格、拐点冻结 CLI、"不可分辨"判定器 | K1-1 / v1.2-f |
+| `selftest.py` | 九条门禁 G1–G9（确定性/不变量/饱和探针/八臂/分析链/schema/引擎平面/adapter/网格） | K0-1/2 精神 |
 
 ## 三个最重要的设计决定（读代码前记住）
 
@@ -43,7 +46,11 @@ synth.py    →   trace.py      →   planes.py      ←    hooks.py      ←   
 
 ## 状态
 
-- [x] 模拟器侧八臂 + 回放器 + 分析链 + 门禁（2026-09-23，selftest 全绿）
-- [ ] 真 trace adapter（K0-2 正身，等 5 个公开 trace 源接入）
-- [ ] 引擎侧双平面/四钩子接进 `nanovllm/engine/block_manager.py`（T5 之后）
-- [ ] logprob 机制闸门 K0-3（需要真实引擎，云机做）
+- [x] 模拟器侧八臂 + 回放器 + 分析链 + 门禁（2026-09-23，selftest G1–G9 全绿）
+- [x] 引擎侧双平面包装器 `engine_plane.py`（猴子补丁，不改上游；FakeBM 自测过，
+  真引擎首验在云机）
+- [x] adapter 框架 + K0-4 复核机（五源字段映射为待核骨架，真文件到手只改 FIELD_MAP）
+- [x] K1 装备 `grid.py`（网格跑分 + `freeze` 拐点冻结 + 不可分辨判定器；
+  跑分仍锁 PROTOCOL 签字）
+- [ ] 五源真实字段核实（K0-2，需下载真 trace）
+- [ ] 引擎侧真机首验 + logprob 闸门 `tools/logprob_gate.py` 首跑（K0-3，云机）

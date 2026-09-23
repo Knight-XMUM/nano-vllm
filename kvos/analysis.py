@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import statistics
@@ -99,3 +100,46 @@ def refault_stats(refault_distances, n_evicted):
     elif d:
         out["median"] = float(d[0])
     return out
+
+
+def block_profiles(events: List[tr.Event]) -> Dict[str, dict]:
+    """每块画像：fanout（oracle）+ freq（总触达次数）—— H4 四象限的原料。"""
+    freq: Dict[str, int] = defaultdict(int)
+    for ev in events:
+        for h in tr.access_hashes(ev):
+            freq[h] += 1
+    fan = tr.derive_fanout(events)
+    return {h: {"fanout": fan[h], "freq": freq[h]} for h in fan}
+
+
+def class_breakdown(events: List[tr.Event], event_log: List[str]) -> dict:
+    """H4 四象限分解（v1.1 口径：报相对占比，不报绝对阈值）。
+
+    块按 oracle fanout 与 freq 的中位数切四象限（hi/lo × hi/lo）；
+    从回放日志数各象限的 evict/refault 次数，报 refault 占比分布。
+    """
+    prof = block_profiles(events)
+    if not prof:
+        return {}
+    fan_med = statistics.median(p["fanout"] for p in prof.values())
+    freq_med = statistics.median(p["freq"] for p in prof.values())
+
+    def quad(h):
+        p = prof.get(h)
+        if p is None:
+            return None
+        return ("hiF" if p["fanout"] > fan_med else "loF") + \
+               ("_hiQ" if p["freq"] > freq_med else "_loQ")
+
+    out = defaultdict(lambda: {"n_evict": 0, "n_refault": 0})
+    for line in event_log:
+        d = json.loads(line)
+        if d["kind"] not in ("evict", "refault"):
+            continue
+        q = quad(d["hash"])
+        if q:
+            out[q]["n_" + d["kind"]] += 1
+    total_ref = sum(v["n_refault"] for v in out.values()) or 1
+    for q, v in out.items():
+        v["refault_share"] = v["n_refault"] / total_ref
+    return dict(out)
