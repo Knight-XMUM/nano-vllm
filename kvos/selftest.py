@@ -366,6 +366,26 @@ def main():
     check("G9 H4 四象限分解产出", isinstance(cb, dict) and len(cb) > 0,
           "quadrants=%d" % len(cb))
 
+    # G10 死刑判官：样本地板 → 死刑②证据 → no_knee 豁免 → 跨 trace 汇总
+    from kvos import judge
+    rows_d = grid.run_grid(events, [80, 220], ["B", "C", "D_online", "F", "G"])
+    v_small = judge.evaluate(rows_d, rec, n_sessions=12)
+    v_full = judge.evaluate(rows_d, rec, n_sessions=30)
+    v_noknee = judge.evaluate(rows_d, dict(rec, no_knee=True), n_sessions=30)
+    check("G10 样本地板：12 会话判 untestable（v1.2-e）",
+          v_small["checks"]["sample_floor"]["status"] == "untestable")
+    check("G10 死刑②：30 会话出判定且证据含 C/D_online vs G",
+          v_full["checks"]["death2_h5"]["status"] in ("alive", "dead")
+          and "C_vs_G" in v_full["checks"]["death2_h5"]["evidence"]
+          and "D_online_vs_G" in v_full["checks"]["death2_h5"]["evidence"],
+          "death2=%s" % v_full["checks"]["death2_h5"]["status"])
+    check("G10 no_knee → 死刑③ untestable（不可检验≠死刑）",
+          v_noknee["checks"]["death3_h6"]["status"] == "untestable")
+    agg = judge.aggregate([v_full, v_noknee])
+    check("G10 跨 trace 汇总产出 global 判定",
+          agg["global"] in ("alive", "DEAD") and agg["counted_traces"] == 2,
+          "global=%s dead=%s" % (agg["global"], agg["dead_criteria"]))
+
     print("\nselftest %s" % ("ALL PASS" if ok else "HAS FAILURES"))
     return 0 if ok else 1
 

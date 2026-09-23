@@ -1,0 +1,16 @@
+name: kvos-selftest
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: KVOS replay-simulator gates (pure stdlib, no GPU needed)
+        run: python -m kvos.selftest
