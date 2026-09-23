@@ -10,8 +10,12 @@ blast radius) — should dominate KV-block eviction at which cache/working-set r
 Hypotheses (H1–H9), the trace schema, the metric chain, and three kill criteria are
 **pre-registered** before any policy benchmark runs.
 
-**Status (2026-09-20):** engine verified and version-pinned; K0 platform code in progress.
-The code is currently identical to upstream `bb823b3`.
+**Status (2026-09-23):** engine verified and version-pinned. Deviations from upstream so
+far are minimal and logged: a true-greedy sampler branch (`temperature=0` → argmax, in
+`nanovllm/layers/sampler.py`), and the **`kvos/` replay simulator** — a pure-stdlib,
+GPU-free prototype of the dual-plane allocator, the four policy hooks, and the eight-arm
+eviction suite (`python3 -m kvos.selftest` runs the K0-style gates; see `kvos/README.md`
+for the module map). Engine-side wiring into `block_manager.py` comes later (T5 gate).
 
 ## Verified evidence (measured, not claimed)
 
@@ -28,8 +32,9 @@ Recorded as experiment E-001 (2026-09-16). Raw numbers; warmup runs discarded.
 - **K0** — dual-plane allocator (live plane pinned / context plane evictable), four policy
   hooks (`on_allocate` / `on_access` / `on_evict` / `on_commit`), deterministic trace
   replayer, logprob-parity gate (≤1e-4)
-- **K1** — six-arm eviction grid over c/N: A hash-block LRU · B radix-tree LRU ·
-  C +frequency · D +blast-radius fanout · E Belady oracle bound · F one-line heuristic.
+- **K1** — eight-arm eviction grid over c/N: A hash-block LRU · B radix-tree LRU ·
+  C +ARC frequency · D +blast-radius fanout (online & oracle) · E Belady bound ·
+  F pure random · G skip-shared heuristic · H CLOCK (already implemented in `kvos/arms/`).
   Metric chain: refault distance → recomputed tokens → PCIe bytes → P99 TTFT/TBT
 - **K2** — COW fork for branched generation + HBM→host lookahead offload
 - **K3** — block-size / fragmentation study, migration cost model, MoE expert paging repro
