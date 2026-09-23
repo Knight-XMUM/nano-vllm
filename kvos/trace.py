@@ -72,7 +72,10 @@ def load_events(path: str) -> Tuple[List[Event], dict]:
             line = line.strip()
             if not line:
                 continue
-            d = json.loads(line)
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError("line %d: 非法 JSON: %s" % (total, e)) from e
             schema = d.get("schema", SCHEMA)
             if schema != SCHEMA:
                 raise ValueError("line %d: schema %r != %r" % (total, schema, SCHEMA))

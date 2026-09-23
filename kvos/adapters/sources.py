@@ -86,7 +86,7 @@ class BailianAdapter(JsonlAdapter):
             session_id=str(d["chat_id"]),
             request_id="c%s_t%s_%d" % (d["chat_id"], d.get("turn", "?"), lineno),
             parent_request_id=(None if d.get("parent_chat_id", -1) in (-1, None)
-                               else "c%s" % d["parent_chat_id"]),
+                               else "chat:%s" % d["parent_chat_id"]),
             arrive_ts_ms=int(float(d.get("timestamp", 0)) * 1000),
             think_time_ms=0,
             prefix_block_hashes=hashes,
@@ -139,12 +139,15 @@ class CacheWiseAdapter(Adapter):
 
     无块哈希 → 位置派生（hash_provenance=derived）：
     会话内第 i 个块的身份 = f"{session}:{i}"（历史只增不减，位置即身份）；
-    首请求的 cache_read_input_tokens 视为项目级共享前缀，映射成
-    f"{project}:sys:{i}" —— 跨会话共享的近似。两条假设都在 notes 里写明，
-    K0-4 复核时对照源论文统计校准。"""
+    首 llm_call 的 cache_read+cache_creation 段视为项目级共享前缀（系统 prompt
+    一次性写入、之后所有人读），映射成 f"{project}:sys:{i}" —— 跨会话共享的近似。
+    上下文总长 = cache_read + cache_creation + input_tokens（三个计费段合起来
+    才是完整 prompt；只数 input_tokens 会把 cache_read 的整段历史丢掉）。
+    两条假设都在 notes 里写明，K0-4 复核时对照源论文统计校准。"""
     name = "cachewise"
     source_url = "github.com/cachewise-project/cachewise-coding-traces parsed_traces/"
-    notes = "派生哈希假设：会话内位置=身份；首请求 cache_read 前缀=项目共享段。"
+    notes = ("派生哈希假设：会话内位置=身份；首请求 cache_read+cache_creation 段"
+             "=项目共享前缀；总长=三计费段求和。")
 
     def parse_file(self, path: str) -> Tuple[List[Event], dict]:
         with open(path) as f:
@@ -152,16 +155,20 @@ class CacheWiseAdapter(Adapter):
         proj = os.path.basename(os.path.dirname(os.path.dirname(path)))
         kept: List[Event] = []
         dropped = 0
-        shared_blocks_hint = None                    # 首请求 cache_read 推共享前缀长
+        shared_blocks_hint = None                    # 首 llm_call 共享段长度（块）
         for i, d in enumerate(rows):
             if d.get("event_type") != "llm_call":
                 continue
             sid = str(d.get("session_id") or os.path.basename(os.path.dirname(path)))
             in_tok = int(d.get("input_tokens", 0) or 0)
             cache_read = int(d.get("cache_read_input_tokens", 0) or 0)
-            nblocks = max(1, math.ceil(in_tok / 16))
+            cache_create = int(d.get("cache_creation_input_tokens", 0) or 0)
+            total_tok = cache_read + cache_create + in_tok
+            nblocks = max(1, math.ceil(total_tok / 16))
             if shared_blocks_hint is None:
-                shared_blocks_hint = min(nblocks, math.ceil(cache_read / 16))
+                # 首请求已建好的上下文（read+creation）≈ 项目共享前缀；
+                # input_tokens 是本轮新话，保持会话私有
+                shared_blocks_hint = min(nblocks, math.ceil((cache_read + cache_create) / 16))
             hashes = [
                 ("%s:sys:%d" % (proj, j)) if j < shared_blocks_hint
                 else ("%s:%d" % (sid, j))
@@ -174,7 +181,7 @@ class CacheWiseAdapter(Adapter):
                 arrive_ts_ms=_iso_ms(d["timestamp"]) if d.get("timestamp") else i,
                 think_time_ms=0,
                 prefix_block_hashes=hashes,
-                new_prefill_tokens=int(d.get("cache_creation_input_tokens", 0) or 0),
+                new_prefill_tokens=0,    # 位置哈希已覆盖全部输入块，不再另计（防双计）
                 gen_tokens=int(d.get("output_tokens", 0) or 0),
                 tool_output_blocks=int(d.get("num_tools_called", 0) or 0),
                 hash_provenance="derived",

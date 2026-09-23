@@ -32,7 +32,6 @@ def main():
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, repo_root)
 
-    import random
     from nanovllm import LLM, SamplingParams
     from kvos import arms
     from kvos.engine_plane import DualPlaneAllocator
@@ -44,18 +43,22 @@ def main():
     if bm is None:
         raise RuntimeError("找不到 block_manager 属性路径，需要按云机实际结构改这行")
 
-    policy = arms.make(args.arm, seed=args.seed)   # oracle 臂在真引擎无未来信息 → 仅对照
+    if args.arm in ("E", "D_oracle"):
+        raise SystemExit(
+            "oracle 臂在真引擎拿不到未来信息（next_use/final_fanout），"
+            "强行跑只会静默退化成错误语义——真引擎只跑在线臂 A/B/C/D_online/F/G/H")
+    policy = arms.make(args.arm, seed=args.seed)
     alloc = DualPlaneAllocator(bm, policy, context_capacity=args.context_blocks)
 
-    rng = random.Random(args.seed)
     prompts = ["Explain KV cache block %d in LLM serving." % i
                for i in range(args.requests)]
     sp = SamplingParams(temperature=0.0, max_tokens=32)
     llm.generate(prompts, sp, use_tqdm=False)
 
     print("arm=%s context_capacity=%s tick=%d" % (args.arm, args.context_blocks, alloc.tick))
-    print("context resident=%d  meta tracked=%d  evicted=%d"
-          % (len(alloc.context_ids), len(alloc.meta), len(alloc.evict_tick)))
+    print("context resident=%d  meta tracked=%d  evicted=%d  refaults=%d"
+          % (len(alloc.context_ids), len(alloc.meta), len(alloc.evict_tick),
+             len(alloc.refaults)))
     sat = getattr(policy, "saturation", lambda: None)()
     if sat is not None:
         print("CLOCK bit-saturation=%.3f" % sat)

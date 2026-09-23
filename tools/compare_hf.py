@@ -59,6 +59,8 @@ def main():
 
     print("HF  :", tok.decode(hf_ids))
     print("nano:", nano_text)
+    print("lengths: hf=%d nano=%d (比对窗口=%d；任一侧早 EOS 时窗口缩短，"
+          "agreement 需按原 n 口径解读)" % (len(hf_ids), len(nano_ids), m))
     print("token agreement: %d/%d, first divergence: %s" % (agree, m, first_diff))
 
 

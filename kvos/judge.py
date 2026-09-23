@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Dict, List, Optional
 
 from kvos import analysis, trace as tr
@@ -71,9 +70,9 @@ def evaluate(rows: List[dict], knee_rec: dict, n_sessions: int,
                  if c["W"] == W_knee), None)
 
     # ---- 不可分辨先行：refault CI 半宽 >= 阈值的格子标 indeterminate ----
-    wide = [r["arm"] for r in rows
-            if r.get("refault_ci") and r["refault_ci"][0] is not None
-            and (r["refault_ci"][1] - r["refault_ci"][0]) / 2 >= threshold]
+    wide = sorted({r["arm"] for r in rows
+                   if r.get("refault_ci") and r["refault_ci"][0] is not None
+                   and (r["refault_ci"][1] - r["refault_ci"][0]) / 2 >= threshold})
     out["checks"]["ci_width"] = {
         "status": "ok" if not wide else "indeterminate",
         "wide_arms": wide,

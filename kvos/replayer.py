@@ -65,7 +65,9 @@ class Replayer:
         # 2) miss 重算 + 新块出生；父块 = 链上前驱
         parent = prefix[k - 1] if k else None
         for h in missed + tr.new_block_hashes(ev):
-            was_evicted = h in t.evict_tick
+            # was_evicted 只认"真被策略驱逐过且不驻留"：链断孤儿虽在 missed 里
+            # 却仍驻留 context（父块死了它没死），当前世没被逐过 → 不算 refault
+            was_evicted = h in t.evict_tick and t.get(h) is None
             if was_evicted:
                 dist = tick - t.evict_tick[h]
                 self.refaults.append(dist)

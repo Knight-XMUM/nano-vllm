@@ -152,9 +152,11 @@ class _TrackPolicy(arms.HashLRU):
     def __init__(self):
         self.calls = {"alloc": 0, "access": 0, "evict": 0, "commit": 0}
         self.evict_cands = []
+        self.alloc_flags = []          # 每次 on_allocate 的 was_evicted 旗标
 
     def on_allocate(self, blk, tick, was_evicted):
         self.calls["alloc"] += 1
+        self.alloc_flags.append(was_evicted)
 
     def on_access(self, blk, tick):
         self.calls["access"] += 1
@@ -283,6 +285,29 @@ def main():
     evicted_hash = alloc.evict_tick.keys()
     check("G7 牺牲者不是 B 的块",
           not any(bm.blocks[b].hash in evicted_hash for b in b_live))
+
+    # G7b refault：被驱逐的 A 尾块被重新请求 → was_evicted 旗标 +
+    # 父块 _children 回补（假叶子修复）+ refault 距离入账 + ever-shared 代理
+    bm.deallocate(sb)                                  # B 死 → A0/A1/Bnew 进 context
+    sd = _FakeSeq("D", list(range(12)), bs)            # D 要 A 的整条链
+    h0 = FakeBM.compute_hash([0, 1, 2, 3], -1)
+    h1 = FakeBM.compute_hash([4, 5, 6, 7], h0)
+    h2 = FakeBM.compute_hash([8, 9, 10, 11], h1)
+    nd = bm.can_allocate(sd)
+    bm.allocate(sd, nd)
+    sd.num_scheduled_tokens = len(sd.token_ids) - sd.num_cached_tokens
+    bm.hash_blocks(sd)
+    check("G7b 驱逐过的尾块 refault：was_evicted=True + 距离入账",
+          pol.alloc_flags[-1] is True and len(alloc.refaults) == 1
+          and alloc.refaults[0] == 1,
+          "flags=%s refaults=%s" % (pol.alloc_flags[-1], alloc.refaults))
+    check("G7b 假叶子修复：h2 的父边重新挂上（h1 有驻留孩子，非叶子）",
+          alloc._parent.get(h2) == h1 and not pol.table.is_leaf(h1),
+          "parent=%s children=%d" % (alloc._parent.get(h2),
+                                     alloc._children.get(h1, -1)))
+    check("G7b ever-shared 代理：A0 被 A/B/D 摸过 → shared_count>=2（修复前恒 0）",
+          pol.table.shared_count(h0) >= 2,
+          "fanout_obs=%d" % pol.table.shared_count(h0))
 
     # G8 adapter 框架 + K0-4 复核机
     with tempfile.TemporaryDirectory() as d:

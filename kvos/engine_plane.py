@@ -33,6 +33,7 @@ class DualPlaneAllocator:
         self.context_capacity = context_capacity   # None = 不设上限（≈上游原行为）
         self.tick = 0                              # 请求粒度时钟（allocate 一响 +1）
         self.context_ids: "OrderedDict[int, None]" = OrderedDict()  # bid 驻留可驱逐
+        self.refaults: list = []                   # 每次 refault 的距离（tick 差）
         self.meta: Dict[int, MetaBlock] = {}       # 内容哈希 -> MetaBlock
         self._parent: Dict[int, Optional[int]] = {}  # 哈希 -> 父块哈希
         self._children: Dict[int, int] = {}        # 哈希 -> 驻留子块数（叶子判定）
@@ -51,10 +52,17 @@ class DualPlaneAllocator:
             self._parent[h] = parent
             if parent is not None:
                 self._children[parent] = self._children.get(parent, 0) + 1
+        elif m.plane == "evicted" and self._parent.get(h) is not None:
+            # refault 复活：evict() 曾给父块减过子数，这里必须回补——
+            # 否则父块被误判成叶子，B 臂会驱逐"其实还有驻留子块"的块
+            p = self._parent[h]
+            self._children[p] = self._children.get(p, 0) + 1
         return m
 
     def _note_access(self, h: int, seq_id, tick: int) -> MetaBlock:
-        m = self._meta(h, tick)
+        # meta 必须已存在（hash_blocks 先 _meta 注册身份/父边）。
+        # 这里若自建会以 parent=None 建档 → 父边全丢（历史 bug）；直接炸更诚实。
+        m = self.meta[h]
         m.plane = "live"
         m.last_access = tick
         m.freq += 1
@@ -107,11 +115,15 @@ class DualPlaneAllocator:
 
         def _allocate_block():
             if not bm.free_block_ids:
+                if not self_.context_ids:
+                    raise RuntimeError(
+                        "KVOS OOM：free 与 context plane 全空，无块可分（上游此时同样会崩）")
                 self_.evict(self_._pick_victim())   # 牺牲者回 free 尾，下一轮 popleft 取走
             return orig_alloc_block()
 
         def _deallocate_block(block_id):
             # refcount 归零：不回 free deque，进 context plane
+            assert bm.blocks[block_id].ref_count == 0   # 上游不变量，补丁不许丢
             bm.used_block_ids.remove(block_id)
             self_.context_ids[block_id] = None
             h = bm.blocks[block_id].hash
@@ -171,6 +183,12 @@ class DualPlaneAllocator:
                     s.discard(seq.seq_id)
             self_._enforce_capacity()
 
+        def can_append(seq):
+            # 上游只看 free；KVOS：free + context 都算供给（context 不够可驱逐腾位），
+            # 否则 free 空时引擎会走抢占路径而不是驱逐——KVOS 语义被架空
+            need = 1 if (len(seq) % bm.block_size == 1) else 0
+            return len(bm.free_block_ids) + len(self_.context_ids) >= need
+
         def hash_blocks(seq):
             orig_hash_blocks(seq)
             # 新块此刻才有内容身份：注册 meta + 父链 + on_allocate（refault 在此认出）
@@ -183,14 +201,20 @@ class DualPlaneAllocator:
                     continue                       # 已在册（cached 命中在 allocate 记过）
                 parent = bm.blocks[seq.block_table[i - 1]].hash if i else None
                 was_evicted = h in self_.evict_tick
-                self_._note_access(h, seq.seq_id, self_.tick)
+                if was_evicted:
+                    self_.refaults.append(self_.tick - self_.evict_tick[h])
+                # 顺序敏感：先 _meta 注册身份+父边（此刻 m.plane 仍是 evicted，
+                # 才能触发 _children 回补）；后 _note_access 记访问统计。
+                # 反过来会让 _note_access 先以 parent=None 建 meta → 父边全丢
                 m = self_._meta(h, self_.tick, parent)
+                self_._note_access(h, seq.seq_id, self_.tick)
                 m.plane = "live"
                 self_.policy.on_allocate(m, self_.tick, was_evicted)
 
         bm._allocate_block = _allocate_block
         bm._deallocate_block = _deallocate_block
         bm.can_allocate = can_allocate
+        bm.can_append = can_append
         bm.allocate = allocate
         bm.deallocate = deallocate
         bm.hash_blocks = hash_blocks
@@ -204,7 +228,9 @@ class _TableView:
 
     @property
     def capacity(self):
-        return max(1, len(self._a.context_ids))
+        # 策略（ARC 幽灵上限等）要的是"context plane 标称容量"：
+        # 显式设了用显式值；没设退化为当前驻留数（≈上游无界行为）
+        return self._a.context_capacity or max(1, len(self._a.context_ids))
 
     def get(self, h):
         return self._a.meta.get(h)   # 键 = 原始哈希值（int 或 str，视引擎而定）
@@ -213,4 +239,8 @@ class _TableView:
         return self._a._children.get(h, 0) == 0
 
     def shared_count(self, h):
-        return len(self._a._holders.get(h, ()))
+        # 模拟器口径 = "当前链还指认它的会话数"（会话会退订）；
+        # 引擎侧拿不到会话生命周期，context 块的活 holder 恒为 0（持有必在 used），
+        # 用"至今见过的不同 seq 数"作最近可行代理（ever-shared ≥ current-subscribers）
+        m = self._a.meta.get(h)
+        return m.fanout_obs if m is not None else 0

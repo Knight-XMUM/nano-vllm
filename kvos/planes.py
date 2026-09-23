@@ -71,6 +71,17 @@ class DualPlaneTable:
             blk.fanout_obs += 1
 
     def allocate(self, h: str, tick: int, parent: Optional[str] = None) -> Block:
+        # 链式哈希孤儿顶替：父块被逐后，下游块虽驻留却永远查不到（索引被链断裂
+        # 劫持）。重算同 hash 时旧对象作废——不算策略驱逐（它是父块驱逐的连带
+        # 损失，代价已计入本请求 miss/recomputed_tokens），父边记账清掉重挂。
+        stale = self.context.pop(h, None)
+        if stale is not None:
+            stale.plane = "evicted"
+            if stale.parent is not None:
+                self._children[stale.parent] = \
+                    max(0, self._children.get(stale.parent, 1) - 1)
+        assert h not in self.live, \
+            "allocate 撞车：%s 在 live（同请求重复 hash？trace 脏数据）" % h
         blk = Block(hash=h, plane="live", born=tick, parent=parent)
         self.live[h] = blk
         if parent is not None:

@@ -36,14 +36,15 @@ def gen_trace(
         history: List[str] = []
         parent = None
         for r in range(reqs_per_session):
-            ts += think_ms + rng.randint(0, think_ms)
+            gap = think_ms + rng.randint(0, think_ms)   # 实际抽到的思考间隔
+            ts += gap
             rid = "s%dr%d" % (s, r)
             ev = tr.Event(
                 session_id="s%d" % s,
                 request_id=rid,
                 parent_request_id=parent,
                 arrive_ts_ms=ts,
-                think_time_ms=think_ms,
+                think_time_ms=gap,
                 # 前缀 = 会话上轮的完整链（已含共享链头）；首轮直接用共享链
                 prefix_block_hashes=list(history) if history else list(chain),
                 new_prefill_tokens=rng.randint(24, 160),
