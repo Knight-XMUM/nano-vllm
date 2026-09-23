@@ -33,7 +33,9 @@ synth.py    →   trace.py      →   planes.py      ←    hooks.py      ←   
 | `engine_plane.py` | **引擎侧双平面**：猴子补丁包装 BlockManager，free-list→policy 辖区 | K0-1 正身 |
 | `adapters/` | 真 trace → canonical 的适配层 + K0-4 复核机 | K0-2 / K0-4 |
 | `grid.py` | K1 装备：臂×容量网格、拐点冻结 CLI、"不可分辨"判定器 | K1-1 / v1.2-f |
-| `selftest.py` | 九条门禁 G1–G9（确定性/不变量/饱和探针/八臂/分析链/schema/引擎平面/adapter/网格） | K0-1/2 精神 |
+| `judge.py` | **死刑判官**：三条死刑判据 + 样本地板 + CI宽度 + 跨trace汇总 | §7 矩阵 / v1.2 |
+| `report.py` | 网格结果 → markdown 表 + 判定小节（OPTLOG 直接粘贴） | §5 指标链 |
+| `selftest.py` | 十条门禁 G1–G10（…/adapter/网格/判官） | K0-1/2 精神 |
 
 ## 三个最重要的设计决定（读代码前记住）
 
@@ -46,11 +48,13 @@ synth.py    →   trace.py      →   planes.py      ←    hooks.py      ←   
 
 ## 状态
 
-- [x] 模拟器侧八臂 + 回放器 + 分析链 + 门禁（2026-09-23，selftest G1–G9 全绿）
+- [x] 模拟器侧八臂 + 回放器 + 分析链 + 门禁（2026-09-23，selftest G1–G10 全绿）
 - [x] 引擎侧双平面包装器 `engine_plane.py`（猴子补丁，不改上游；FakeBM 自测过，
   真引擎首验在云机）
-- [x] adapter 框架 + K0-4 复核机（五源字段映射为待核骨架，真文件到手只改 FIELD_MAP）
-- [x] K1 装备 `grid.py`（网格跑分 + `freeze` 拐点冻结 + 不可分辨判定器；
-  跑分仍锁 PROTOCOL 签字）
-- [ ] 五源真实字段核实（K0-2，需下载真 trace）
+- [x] adapter 五源**真实现**（字段逐一核实真实文件/官方文档；G8b 用真schema样本验过）
+- [x] K1 装备 `grid.py` + **判官 `judge.py`**（三条死刑/样本地板/CI宽度/跨trace汇总，
+  与 PROTOCOL v1.2 逐字对齐）+ `report.py` OPTLOG 表渲染
+- [x] `python3 -m kvos` CLI：selftest/convert/stats/freeze/run/judge 一个入口；
+  GitHub Actions 每次 push 自动跑 selftest
+- [ ] Bailian LFS 真文件下载 + 五源 K0-4 复核（云机）
 - [ ] 引擎侧真机首验 + logprob 闸门 `tools/logprob_gate.py` 首跑（K0-3，云机）
