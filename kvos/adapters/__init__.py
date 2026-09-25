@@ -20,8 +20,10 @@ from kvos.adapters.stats import stats_report, check_reproduction
 def get(name: str) -> Adapter:
     if name == "canonical":
         return CanonicalAdapter()
+    if name not in SOURCES:
+        raise KeyError("未知 adapter %r，可选：%s" % (name, sorted(SOURCES)))
     return SOURCES[name]()
 
 
 def names():
-    return list(SOURCES)
+    return ["canonical"] + sorted(SOURCES)

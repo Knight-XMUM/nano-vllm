@@ -57,6 +57,7 @@ def main():
         return 0
     if cmd == "judge":
         import json
+        import os
         from kvos import grid, judge
         from kvos.analysis import kneedle, sw_curve
         from kvos.trace import load_events
@@ -68,12 +69,17 @@ def main():
         caps = caps or [64, 128, 256, 512, 1024]
         events, _io_stats = load_events(path)
         n_sess = len({e.session_id for e in events})
-        curve = sw_curve(events)
-        W, r, det = kneedle(curve)
-        knee_rec = {"curve": [{"W": w, "W_set": ws, "S": s}
-                              for w, ws, s in curve],
-                    "W_knee": W, "r_star": r,
-                    "no_knee": W is None, "detail": det}
+        knee_path = path.replace(".jsonl", "") + ".knee.json"
+        if os.path.exists(knee_path):
+            knee_rec = json.load(open(knee_path))   # 有冻结文件一律用冻结值
+        else:
+            curve = sw_curve(events)
+            W, r, det = kneedle(curve)
+            knee_rec = {"curve": [{"W": w, "W_set": ws, "S": s}
+                                  for w, ws, s in curve],
+                        "W_knee": W, "r_star": r,
+                        "no_knee": W is None, "detail": det,
+                        "frozen_at": "(in-memory, 未落盘——正式判定请先 freeze)"}
         rows = grid.run_grid(events, caps)
         v = judge.evaluate(rows, knee_rec, n_sess)
         print(json.dumps(v, indent=2, ensure_ascii=False))

@@ -2,7 +2,8 @@
 
 生成结构：n_chains 条"系统 prompt 式"共享前缀链（各 chain_depth 块），
 会话按 Zipf 权重选链 → 共享链块天然高扇出；会话历史块是私有的（扇出 1）。
-负载形状可调：会话数/轮数/链数/链深/Zipf 偏度/工具输出概率/think time。
+负载形状可调：会话数/轮数/链数/链深/Zipf 偏度/工具输出概率/think time/
+fork 概率（会话中途换共享链分叉，模拟 agent 换任务/重开上下文）。
 
 纪律：合成 trace 只用于诊断与门禁自测，任何结论都要等真 trace（§4.3）。
 """
@@ -23,6 +24,7 @@ def gen_trace(
     zipf_alpha: float = 1.1,
     tool_p: float = 0.3,
     think_ms: int = 8000,
+    fork_p: float = 0.0,
     seed: int = 0,
 ) -> List[tr.Event]:
     rng = random.Random(seed)
@@ -39,13 +41,22 @@ def gen_trace(
             gap = think_ms + rng.randint(0, think_ms)   # 实际抽到的思考间隔
             ts += gap
             rid = "s%dr%d" % (s, r)
+            # fork：会话中途换一条共享链 = 开新分支（旧历史整链扔掉）。
+            # 旧链私有段变孤儿等待驱逐，共享头仍被别的会话引用——
+            # 这正是"拓扑信号比 recency 多看见的东西"的合成版。
+            if history and rng.random() < fork_p:
+                alt = [c for c in chains if c is not chain]
+                if alt:
+                    chain = rng.choice(alt)
+                    history = list(chain)
+                    parent = None       # 分叉点：parent_request_id 断链标记
             ev = tr.Event(
                 session_id="s%d" % s,
                 request_id=rid,
                 parent_request_id=parent,
                 arrive_ts_ms=ts,
                 think_time_ms=gap,
-                # 前缀 = 会话上轮的完整链（已含共享链头）；首轮直接用共享链
+                # 前缀 = 会话上轮的完整链（已含共享链头）；首轮/分叉后直接用共享链
                 prefix_block_hashes=list(history) if history else list(chain),
                 new_prefill_tokens=rng.randint(24, 160),
                 gen_tokens=rng.randint(32, 96),

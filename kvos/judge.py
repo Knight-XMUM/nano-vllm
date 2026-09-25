@@ -147,18 +147,24 @@ def evaluate(rows: List[dict], knee_rec: dict, n_sessions: int,
 
 
 def aggregate(verdicts: List[dict]) -> dict:
-    """跨 trace 汇总：任一死刑在 ≥1 个合格 trace 上触发 → 全局死（H6 另需≥2票）。"""
+    """跨 trace 汇总：任一死刑在 ≥1 个合格 trace 上触发 → 全局死。
+    例外是 H6（死刑③）：协议要求 ≥2 条真 trace 都把 r_obs 落在 r*±10%
+    才算活；合格 trace 不足 2 条时 H6 是"测不了"而不是"证伪"——
+    不许拿一条 trace 的缺席去杀人。"""
     counted = [v for v in verdicts
                if v["checks"].get("sample_floor", {}).get("status") != "untestable"]
     h6_alive = sum(1 for v in counted
                    if v["checks"].get("death3_h6", {}).get("status") == "alive")
-    dead_votes = [d for v in counted for d in v.get("dead_criteria", [])]
-    dead = set(dead_votes)
-    if counted and h6_alive < 2 and all(
-            v["checks"].get("death3_h6", {}).get("status") != "untestable"
-            for v in counted):
-        dead.add("death3_h6")
+    h6_dead = sum(1 for v in counted
+                  if v["checks"].get("death3_h6", {}).get("status") == "dead")
+    dead = {d for v in counted for d in v.get("dead_criteria", [])}
+    if len(counted) >= 2 and h6_alive < 2 and h6_dead >= 1:
+        dead.add("death3_h6")   # ≥2 票且至少一票真死、活票不够 → H6 死
+    h6_state = ("alive" if h6_alive >= 2
+                else "untestable" if len(counted) < 2
+                else "dead" if h6_dead else "untestable")
     return {"global": "DEAD" if dead else "alive",
             "counted_traces": len(counted),
             "dead_criteria": sorted(dead),
-            "h6_votes_alive": h6_alive}
+            "h6_votes": {"alive": h6_alive, "dead": h6_dead,
+                         "state": h6_state}}

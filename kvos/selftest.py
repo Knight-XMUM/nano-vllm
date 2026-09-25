@@ -410,6 +410,51 @@ def main():
     check("G10 跨 trace 汇总产出 global 判定",
           agg["global"] in ("alive", "DEAD") and agg["counted_traces"] == 2,
           "global=%s dead=%s" % (agg["global"], agg["dead_criteria"]))
+    check("G10 H6 一条 trace 不许判死（票数不足=测不了≠证伪）",
+          judge.aggregate([v_full])["h6_votes"]["state"] == "untestable")
+
+    # G11 链断孤儿顶替：父块被逐 → 下游驻留块永远查不到 → 同 hash 重算
+    # 是"顶替"不是撞车；孤儿不算 refault，只有真被逐的块记距离
+    orphan_events = [
+        tr.Event(session_id="A", request_id="a1", parent_request_id=None,
+                 arrive_ts_ms=0, think_time_ms=0,
+                 prefix_block_hashes=["s0", "s1"],
+                 new_prefill_tokens=0, gen_tokens=16, tool_output_blocks=0),
+        tr.Event(session_id="B", request_id="b1", parent_request_id=None,
+                 arrive_ts_ms=1, think_time_ms=0,
+                 prefix_block_hashes=["b0"],
+                 new_prefill_tokens=0, gen_tokens=16, tool_output_blocks=0),
+        tr.Event(session_id="A", request_id="a2", parent_request_id="a1",
+                 arrive_ts_ms=2, think_time_ms=0,
+                 prefix_block_hashes=["s0", "s1"],
+                 new_prefill_tokens=0, gen_tokens=16, tool_output_blocks=0),
+    ]
+    # 容量 4：A 链 s0,s1,a1#0 三块 + B b0,b1#0 两块 = 5 → 逐出 s0（最老）；
+    # s1/a1#0 驻留变孤儿。req2 要 [s0,s1]：s0 真 refault，s1 顶替不算。
+    rep_o, m_o = run_arm("A", orphan_events, 4)
+    check("G11 孤儿顶替不炸且只有 s0 记 refault",
+          m_o["refault_distances"] == [1],
+          "evict=%d refaults=%s" % (m_o["evictions"], m_o["refault_distances"]))
+    check("G11 孤儿不误记 refault（s1 驻留被顶替，was_evicted=False）",
+          len([x for x in rep_o.log if '"refault"' in x]) == 1)
+
+    # G12 K1-1 冻结执法：没 .knee.json 不许跑分；--allow-unfrozen 只给合成调试
+    import subprocess, sys as _sys
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "t.jsonl")
+        tr.dump_events(events, p)
+        no_freeze = subprocess.run(
+            [_sys.executable, "-m", "kvos.grid", "run", p,
+             "--caps", "64", "--arms", "A", "F"],
+            capture_output=True, text=True, cwd=repo)
+        ok_frozen = subprocess.run(
+            [_sys.executable, "-m", "kvos.grid", "run", p,
+             "--caps", "64", "--arms", "A", "F", "--allow-unfrozen"],
+            capture_output=True, text=True, cwd=repo)
+    check("G12 未冻结被拒、--allow-unfrozen 放行",
+          no_freeze.returncode != 0 and "freeze" in no_freeze.stderr
+          and ok_frozen.returncode == 0)
 
     print("\nselftest %s" % ("ALL PASS" if ok else "HAS FAILURES"))
     return 0 if ok else 1

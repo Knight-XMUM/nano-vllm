@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from typing import Dict, List, Optional
 
@@ -91,6 +92,8 @@ def main():
     r.add_argument("--caps", type=int, nargs="+", required=True)
     r.add_argument("--arms", nargs="*", default=None)
     r.add_argument("--seed", type=int, default=0)
+    r.add_argument("--allow-unfrozen", action="store_true",
+                   help="跳过冻结检查——仅限合成 trace 调试用，真 trace 不许用")
     args = ap.parse_args()
 
     if args.cmd == "freeze":
@@ -98,6 +101,12 @@ def main():
         print(json.dumps({k: rec[k] for k in ("W_knee", "r_star", "no_knee",
                                               "kneedle_diff", "n_events")}, indent=2))
     else:
+        knee_path = args.trace.replace(".jsonl", "") + ".knee.json"
+        if not os.path.exists(knee_path) and not args.allow_unfrozen:
+            raise SystemExit(
+                "没有冻结文件 %s —— K1-1 纪律：先 `python3 -m kvos freeze %s`"
+                " 把拐点落盘再跑分；合成 trace 调试才许加 --allow-unfrozen"
+                % (knee_path, args.trace))
         events, st = tr.load_events(args.trace)
         rows = run_grid(events, args.caps, args.arms, args.seed)
         print(json.dumps(rows, indent=2))
